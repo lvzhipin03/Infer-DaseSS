@@ -51,12 +51,16 @@ def repeat_kv(hidden_states: torch.Tensor, groups: int) -> torch.Tensor:
     return expanded.reshape(batch, heads * groups, length, dimension)
 
 
-def _causal_mask(query_length, key_length, past_length, dtype, device):
+def _allowed_attention_mask(batch_size, query_length, key_length, past_length, attention_mask, device):
     query = past_length + torch.arange(query_length, device=device)
     key = torch.arange(key_length, device=device)
-    blocked = key.unsqueeze(0) > query.unsqueeze(1)
-    mask = torch.zeros(query_length, key_length, dtype=dtype, device=device)
-    return mask.masked_fill(blocked, torch.finfo(dtype).min).view(1, 1, query_length, key_length)
+    allowed = key.unsqueeze(0) <= query.unsqueeze(1)
+    allowed = allowed.view(1, 1, query_length, key_length)
+    if attention_mask is not None:
+        if attention_mask.shape != (batch_size, key_length):
+            raise ValueError("attention_mask must match batch and full key length")
+        allowed = allowed & attention_mask[:, None, None, :].bool()
+    return allowed
 
 
 class QwenToyAttention(nn.Module):
@@ -67,6 +71,7 @@ class QwenToyAttention(nn.Module):
         self.k_proj = nn.Linear(config.hidden_size, config.num_key_value_heads * config.head_dim, bias=config.attention_bias)
         self.v_proj = nn.Linear(config.hidden_size, config.num_key_value_heads * config.head_dim, bias=config.attention_bias)
         self.o_proj = nn.Linear(config.num_attention_heads * config.head_dim, config.hidden_size, bias=False)
+        self.attn_implementation = "eager"
 
     def forward(self, hidden_states, position_embeddings, past_key_value=None, attention_mask=None, use_cache=False):
         batch, length, _ = hidden_states.shape
@@ -82,18 +87,64 @@ class QwenToyAttention(nn.Module):
             key = torch.cat((past_key_value[0], key), dim=2)
             value = torch.cat((past_key_value[1], value), dim=2)
         present = (key, value) if use_cache else None
-        repeated_key = repeat_kv(key, self.config.num_key_value_groups)
-        repeated_value = repeat_kv(value, self.config.num_key_value_groups)
-        scores = torch.matmul(query, repeated_key.transpose(2, 3)) * (self.config.head_dim ** -0.5)
-        scores = scores + _causal_mask(length, key.shape[2], past_length, scores.dtype, scores.device)
+        key_length = key.shape[2]
+        allowed = _allowed_attention_mask(
+            batch, length, key_length, past_length, attention_mask, query.device
+        )
+        logical_scores_shape = (batch, self.config.num_attention_heads, length, key_length)
+        if self.attn_implementation == "eager":
+            repeated_key = repeat_kv(key, self.config.num_key_value_groups)
+            repeated_value = repeat_kv(value, self.config.num_key_value_groups)
+            scores = torch.matmul(query, repeated_key.transpose(2, 3)) * (self.config.head_dim ** -0.5)
+            scores = scores.masked_fill(~allowed, torch.finfo(scores.dtype).min)
+            probabilities = F.softmax(scores.float(), dim=-1).to(value.dtype)
+            output = torch.matmul(probabilities, repeated_value)
+        else:
+            try:
+                output = F.scaled_dot_product_attention(
+                    query,
+                    key,
+                    value,
+                    attn_mask=allowed,
+                    dropout_p=0.0,
+                    is_causal=False,
+                    enable_gqa=True,
+                )
+            except TypeError as error:
+                if "enable_gqa" not in str(error):
+                    raise
+                repeated_key = repeat_kv(key, self.config.num_key_value_groups)
+                repeated_value = repeat_kv(value, self.config.num_key_value_groups)
+                output = F.scaled_dot_product_attention(
+                    query,
+                    repeated_key,
+                    repeated_value,
+                    attn_mask=allowed,
+                    dropout_p=0.0,
+                    is_causal=False,
+                )
+            except RuntimeError as error:
+                message = str(error).lower()
+                if not any(marker in message for marker in ("gqa", "grouped query", "no available kernel")):
+                    raise
+                repeated_key = repeat_kv(key, self.config.num_key_value_groups)
+                repeated_value = repeat_kv(value, self.config.num_key_value_groups)
+                output = F.scaled_dot_product_attention(
+                    query,
+                    repeated_key,
+                    repeated_value,
+                    attn_mask=allowed,
+                    dropout_p=0.0,
+                    is_causal=False,
+                )
         if attention_mask is not None:
-            padding = (1 - attention_mask[:, None, None, :].to(scores.dtype)) * torch.finfo(scores.dtype).min
-            scores = scores + padding
-        probabilities = F.softmax(scores.float(), dim=-1).to(value.dtype)
-        output = torch.matmul(probabilities, repeated_value).transpose(1, 2).contiguous().view(batch, length, -1)
+            query_is_valid = attention_mask[:, key_length - length :].bool()
+            output = output * query_is_valid[:, None, :, None]
+        output = output.transpose(1, 2).contiguous().view(batch, length, -1)
         output = self.o_proj(output)
         trace = {"query": tuple(query.shape), "key": tuple(key.shape), "value": tuple(value.shape),
-                 "repeated_key": tuple(repeated_key.shape), "attention_scores": tuple(scores.shape),
+                 "repeated_key": logical_scores_shape[:-2] + (key_length, self.config.head_dim),
+                 "attention_scores": logical_scores_shape,
                  "attention_output": tuple(output.shape)}
         return output, present, trace
 
@@ -199,6 +250,13 @@ class QwenToyForCausalLM(nn.Module):
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=config.lm_head_bias)
         if config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
+
+    def set_attention_implementation(self, name: str):
+        if name not in {"eager", "sdpa"}:
+            raise ValueError("attention implementation must be eager or sdpa")
+        for layer in self.model.layers:
+            layer.self_attn.attn_implementation = name
+        return self
 
     def forward(self, input_ids, num_logits_to_keep=None, **kwargs):
         if num_logits_to_keep is not None and num_logits_to_keep <= 0:

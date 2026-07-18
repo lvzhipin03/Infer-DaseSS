@@ -1,11 +1,17 @@
+import json
+import sys
+import tempfile
+import types
 import unittest
 from dataclasses import replace
+from pathlib import Path
+from unittest.mock import patch
 
 import torch
 
 from toy_qwen.config import whiteboard_config
 from toy_qwen.modeling import QwenToyForCausalLM
-from toy_qwen.pretrained import _resolve_dtype, validate_checkpoint
+from toy_qwen.pretrained import REQUIRED_MODEL_FILES, _resolve_dtype, load_pretrained_qwen, validate_checkpoint
 
 
 class CheckpointValidationTest(unittest.TestCase):
@@ -63,6 +69,33 @@ class CheckpointValidationTest(unittest.TestCase):
     def test_unsupported_dtype_message_lists_all_supported_values(self):
         with self.assertRaisesRegex(ValueError, "float16.*bfloat16.*float32"):
             _resolve_dtype("float64")
+
+    def test_loader_applies_requested_attention_backend(self):
+        with tempfile.TemporaryDirectory() as directory:
+            model_dir = Path(directory)
+            for name in REQUIRED_MODEL_FILES:
+                (model_dir / name).touch()
+            (model_dir / "config.json").write_text(
+                json.dumps(self.config.to_dict()), encoding="utf-8"
+            )
+            fake_package = types.ModuleType("safetensors")
+            fake_package.__path__ = []
+            fake_torch = types.ModuleType("safetensors.torch")
+            fake_torch.load_file = lambda *_args, **_kwargs: self.state
+
+            with patch.dict(
+                sys.modules,
+                {"safetensors": fake_package, "safetensors.torch": fake_torch},
+            ):
+                model, _ = load_pretrained_qwen(
+                    model_dir,
+                    dtype="float32",
+                    attn_implementation="sdpa",
+                )
+
+        self.assertTrue(
+            all(layer.self_attn.attn_implementation == "sdpa" for layer in model.model.layers)
+        )
 
 
 if __name__ == "__main__":

@@ -85,6 +85,7 @@ def load_pretrained_qwen(
     model_path: str | Path,
     device: str | torch.device = "cpu",
     dtype: str | torch.dtype = "bfloat16",
+    attn_implementation: str = "eager",
 ) -> tuple[QwenToyForCausalLM, CheckpointReport]:
     model_dir = Path(model_path)
     missing_files = [name for name in REQUIRED_MODEL_FILES if not (model_dir / name).is_file()]
@@ -103,6 +104,7 @@ def load_pretrained_qwen(
 
     config = QwenToyConfig.from_json(model_dir / "config.json")
     model = QwenToyForCausalLM(config).to(dtype=target_dtype)
+    model.set_attention_implementation(attn_implementation)
     state_dict = load_file(str(model_dir / "model.safetensors"), device="cpu")
     report = validate_checkpoint(model, state_dict)
     incompatible = model.load_state_dict(state_dict, strict=False)
