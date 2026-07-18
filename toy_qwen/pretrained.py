@@ -39,8 +39,15 @@ def validate_checkpoint(
         for key in expected_keys & actual_keys
         if state_dict[key].shape != expected[key].shape
     }
+    tied_alias_conflict = False
+    if model.config.tie_word_embeddings and {
+        "model.embed_tokens.weight", "lm_head.weight"
+    } <= actual_keys:
+        embedding = state_dict["model.embed_tokens.weight"]
+        lm_head = state_dict["lm_head.weight"]
+        tied_alias_conflict = embedding.shape == lm_head.shape and not torch.equal(embedding, lm_head)
     invalid_missing = missing - allowed_missing
-    if invalid_missing or unexpected or mismatched:
+    if invalid_missing or unexpected or mismatched or tied_alias_conflict:
         details = []
         if invalid_missing:
             details.append(f"missing={sorted(invalid_missing)}")
@@ -48,6 +55,8 @@ def validate_checkpoint(
             details.append(f"unexpected={sorted(unexpected)}")
         if mismatched:
             details.append(f"shape_mismatches={mismatched}")
+        if tied_alias_conflict:
+            details.append("tied aliases model.embed_tokens.weight and lm_head.weight contain different values")
         raise ValueError("invalid checkpoint: " + "; ".join(details))
     return CheckpointReport(
         tensor_count=len(state_dict),

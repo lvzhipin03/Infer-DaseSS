@@ -47,9 +47,6 @@ def greedy_generate(
         raise ValueError("max_new_tokens must be positive")
     if top_k <= 0:
         raise ValueError("top_k must be positive")
-    if input_ids.shape[1] + max_new_tokens > model.config.max_position_embeddings:
-        raise ValueError("prompt plus generated tokens exceeds max_position_embeddings")
-
     generated_ids: list[int] = []
     steps: list[GenerationStep] = []
     past_key_values: PastKeyValues | None = None
@@ -60,6 +57,8 @@ def greedy_generate(
 
     with torch.inference_mode():
         for index in range(max_new_tokens):
+            if input_ids.shape[1] + index > model.config.max_position_embeddings:
+                raise ValueError("generation requires a forward beyond max_position_embeddings")
             output = model(current_ids, past_key_values=past_key_values, use_cache=True)
             if output.past_key_values is None:
                 raise RuntimeError("model did not return a KV cache with use_cache=True")

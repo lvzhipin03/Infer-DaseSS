@@ -22,6 +22,13 @@ class CheckpointValidationTest(unittest.TestCase):
         self.assertEqual(report.tensor_count, len(self.state))
         self.assertEqual(report.expected_tied_missing, ("lm_head.weight",))
 
+    def test_tied_checkpoint_rejects_conflicting_alias_values(self):
+        self.state["model.embed_tokens.weight"].zero_()
+        self.state["lm_head.weight"].fill_(7)
+
+        with self.assertRaisesRegex(ValueError, "tied.*lm_head.weight"):
+            validate_checkpoint(self.model, self.state)
+
     def test_other_missing_tensor_fails(self):
         self.state.pop("model.norm.weight")
 

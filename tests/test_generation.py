@@ -1,9 +1,12 @@
 import unittest
+from dataclasses import replace
 
 import torch
 
 from toy_qwen.generation import greedy_generate
-from toy_qwen.weights import build_whiteboard_model
+from toy_qwen.config import whiteboard_config
+from toy_qwen.modeling import QwenToyForCausalLM
+from toy_qwen.weights import build_whiteboard_model, load_whiteboard_weights
 
 
 class GreedyGenerationTest(unittest.TestCase):
@@ -48,6 +51,22 @@ class GreedyGenerationTest(unittest.TestCase):
     def test_rejects_zero_tokens(self):
         with self.assertRaisesRegex(ValueError, "max_new_tokens"):
             greedy_generate(self.model, self.input_ids, eos_token_id=None, max_new_tokens=0)
+
+    def test_full_context_can_select_one_final_token(self):
+        model = QwenToyForCausalLM(replace(whiteboard_config(), max_position_embeddings=5))
+        load_whiteboard_weights(model)
+
+        result = greedy_generate(model, self.input_ids, eos_token_id=None, max_new_tokens=1)
+
+        self.assertEqual(result.generated_ids, (5,))
+
+    def test_eos_can_stop_before_requested_length_exceeds_context(self):
+        model = QwenToyForCausalLM(replace(whiteboard_config(), max_position_embeddings=5))
+        load_whiteboard_weights(model)
+
+        result = greedy_generate(model, self.input_ids, eos_token_id=5, max_new_tokens=2)
+
+        self.assertEqual(result.generated_ids, (5,))
 
 
 if __name__ == "__main__":
