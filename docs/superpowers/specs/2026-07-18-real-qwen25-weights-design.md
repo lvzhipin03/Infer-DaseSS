@@ -33,7 +33,9 @@ checkpoint 约 988 MB，共 290 个 BF16 tensor。结构为 hidden size 896、FF
 4864、24 层、14 query heads、2 KV heads、head dimension 64、词表 151936、
 `rope_theta=1000000`、Q/K/V 有 bias、embedding 与 LM Head tied。
 
-服务器为 Python 3.8.10、PyTorch 1.13.1+cu117，GPU 是 A800 80GB。正式新增依赖：
+服务器默认 `python3` 是 Python 3.8.10/PyTorch 1.13.1+cu117，但真实模型验收固定使用
+`/root/.pyenv/shims/python3.11`，其环境为 Python 3.11.10、PyTorch 2.10.0+cu128 且
+CUDA 可用。GPU 是 A800 80GB。正式新增依赖：
 
 ```text
 safetensors==0.4.5
@@ -125,7 +127,8 @@ prefill logits shape
 
 服务器验收严格按以下顺序：
 
-1. 创建 `--system-site-packages` venv，复用 CUDA PyTorch。
+1. 使用 `/root/.pyenv/shims/python3.11` 创建 `--system-site-packages` venv，复用
+   PyTorch 2.10.0+cu128。
 2. 安装 safetensors/tokenizers 正式依赖。
 3. 运行现有全部白板测试。
 4. 加载真实 tokenizer，检查 chat prompt 和 token IDs。
