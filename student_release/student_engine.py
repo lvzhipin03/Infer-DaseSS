@@ -12,7 +12,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
-from toy_qwen.generation import greedy_generate
+from toy_qwen.generation import batched_greedy_generate, left_pad_token_ids
 from toy_qwen.pretrained import load_pretrained_qwen
 from toy_qwen.qwen_tokenizer import QwenTokenizerAdapter
 
@@ -45,6 +45,7 @@ class StudentEngine:
             model_path,
             device=self.device,
             dtype=dtype,
+            attn_implementation=attn_implementation,
         )
 
     def generate(
@@ -64,28 +65,32 @@ class StudentEngine:
             raise ValueError("max_new_tokens must be positive")
         if batch_size <= 0:
             raise ValueError("batch_size must be positive")
+        if self.tokenizer.pad_token_id is None:
+            raise ValueError("tokenizer pad_token_id must not be None")
 
-        outputs: list[str] = []
+        encoded_prompts: list[list[int]] = []
         for prompt in prompts:
             _, token_ids = self.tokenizer.encode_chat([
                 {"role": "user", "content": prompt},
             ])
-            input_ids = torch.tensor(
-                [token_ids],
-                dtype=torch.long,
+            encoded_prompts.append(list(token_ids))
+        outputs: list[str] = []
+        for start in range(0, len(encoded_prompts), batch_size):
+            padded = left_pad_token_ids(
+                encoded_prompts[start : start + batch_size],
+                pad_token_id=self.tokenizer.pad_token_id,
                 device=self.device,
             )
-            result = greedy_generate(
+            result = batched_greedy_generate(
                 self.model,
-                input_ids,
-                eos_token_id=None,
+                padded,
                 max_new_tokens=max_new_tokens,
-                top_k=5,
             )
-            outputs.append(
+            outputs.extend(
                 self.tokenizer.decode(
-                    result.generated_ids,
+                    generated_ids,
                     skip_special_tokens=True,
                 )
+                for generated_ids in result.generated_ids
             )
         return outputs
