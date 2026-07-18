@@ -119,6 +119,41 @@ class StudentEngineTest(unittest.TestCase):
             self.model, padded, max_new_tokens=1
         )
 
+    def test_cuda_oom_splits_chunk_and_preserves_order(self):
+        self.tokenizer.encode_chat.side_effect = [
+            ("chat-a", [10]),
+            ("chat-b", [20, 21]),
+        ]
+        padded_pair, padded_a, padded_b = [
+            SimpleNamespace(name=name) for name in ("pair", "a", "b")
+        ]
+        self.pad_token_ids.side_effect = [padded_pair, padded_a, padded_b]
+        self.generate_tokens.side_effect = [
+            torch.cuda.OutOfMemoryError("simulated allocation failure"),
+            SimpleNamespace(generated_ids=((101,),)),
+            SimpleNamespace(generated_ids=((201,),)),
+        ]
+        self.tokenizer.decode.side_effect = ["answer-a", "answer-b"]
+        engine = self.build_engine()
+
+        outputs = engine.generate(["prompt-a", "prompt-b"], 1, batch_size=2)
+
+        self.assertEqual(outputs, ["answer-a", "answer-b"])
+        self.pad_token_ids.assert_has_calls([
+            call([[10], [20, 21]], pad_token_id=151643, device=torch.device("cpu")),
+            call([[10]], pad_token_id=151643, device=torch.device("cpu")),
+            call([[20, 21]], pad_token_id=151643, device=torch.device("cpu")),
+        ])
+
+    def test_cuda_oom_from_single_request_is_not_hidden(self):
+        self.tokenizer.encode_chat.return_value = ("chat", [10])
+        self.pad_token_ids.return_value = SimpleNamespace(name="one")
+        self.generate_tokens.side_effect = torch.cuda.OutOfMemoryError("still too large")
+        engine = self.build_engine()
+
+        with self.assertRaisesRegex(torch.cuda.OutOfMemoryError, "still too large"):
+            engine.generate(["prompt"], 1, batch_size=1)
+
     def test_rejects_empty_prompt_list(self):
         engine = self.build_engine()
         with self.assertRaisesRegex(ValueError, "prompts"):

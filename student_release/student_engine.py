@@ -74,23 +74,37 @@ class StudentEngine:
                 {"role": "user", "content": prompt},
             ])
             encoded_prompts.append(list(token_ids))
+
+        def generate_chunk(token_rows: list[list[int]]) -> tuple[tuple[int, ...], ...]:
+            try:
+                padded = left_pad_token_ids(
+                    token_rows,
+                    pad_token_id=self.tokenizer.pad_token_id,
+                    device=self.device,
+                )
+                result = batched_greedy_generate(
+                    self.model,
+                    padded,
+                    max_new_tokens=max_new_tokens,
+                )
+                return result.generated_ids
+            except torch.cuda.OutOfMemoryError:
+                if len(token_rows) == 1:
+                    raise
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            midpoint = len(token_rows) // 2
+            return generate_chunk(token_rows[:midpoint]) + generate_chunk(token_rows[midpoint:])
+
         outputs: list[str] = []
         for start in range(0, len(encoded_prompts), batch_size):
-            padded = left_pad_token_ids(
-                encoded_prompts[start : start + batch_size],
-                pad_token_id=self.tokenizer.pad_token_id,
-                device=self.device,
-            )
-            result = batched_greedy_generate(
-                self.model,
-                padded,
-                max_new_tokens=max_new_tokens,
-            )
             outputs.extend(
                 self.tokenizer.decode(
                     generated_ids,
                     skip_special_tokens=True,
                 )
-                for generated_ids in result.generated_ids
+                for generated_ids in generate_chunk(
+                    encoded_prompts[start : start + batch_size]
+                )
             )
         return outputs
