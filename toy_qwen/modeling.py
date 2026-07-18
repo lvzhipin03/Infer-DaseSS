@@ -200,7 +200,12 @@ class QwenToyForCausalLM(nn.Module):
         if config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
 
-    def forward(self, input_ids, **kwargs):
+    def forward(self, input_ids, num_logits_to_keep=None, **kwargs):
+        if num_logits_to_keep is not None and num_logits_to_keep <= 0:
+            raise ValueError("num_logits_to_keep must be positive")
         output = self.model(input_ids, **kwargs)
-        return CausalLMOutput(self.lm_head(output.last_hidden_state), output.past_key_values,
+        hidden_states = output.last_hidden_state
+        if num_logits_to_keep is not None:
+            hidden_states = hidden_states[:, -num_logits_to_keep:, :]
+        return CausalLMOutput(self.lm_head(hidden_states), output.past_key_values,
                               output.hidden_states, output.trace)

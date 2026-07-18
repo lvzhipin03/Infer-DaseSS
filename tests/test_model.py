@@ -5,6 +5,7 @@ import torch.nn.functional as F
 
 from toy_qwen.config import QwenToyConfig, whiteboard_config
 from toy_qwen.modeling import QwenToyForCausalLM, QwenToyMLP
+from toy_qwen.weights import build_whiteboard_model
 
 
 class ModelTest(unittest.TestCase):
@@ -30,3 +31,19 @@ class ModelTest(unittest.TestCase):
     def test_14q_2kv_forward(self):
         config = QwenToyConfig(9, 28, 152, 2, 14, 2)
         self.assertEqual(QwenToyForCausalLM(config)(torch.tensor([[0, 1, 2]])).logits.shape, (1, 3, 9))
+
+    def test_num_logits_to_keep_projects_only_last_positions(self):
+        model = build_whiteboard_model().eval()
+        ids = torch.tensor([[0, 1, 2, 3, 4]])
+        full = model(ids, use_cache=False).logits
+        last = model(ids, use_cache=False, num_logits_to_keep=1).logits
+        last_two = model(ids, use_cache=False, num_logits_to_keep=2).logits
+
+        self.assertEqual(last.shape, (1, 1, 9))
+        self.assertEqual(last_two.shape, (1, 2, 9))
+        torch.testing.assert_close(last, full[:, -1:])
+        torch.testing.assert_close(last_two, full[:, -2:])
+
+    def test_num_logits_to_keep_must_be_positive(self):
+        with self.assertRaisesRegex(ValueError, "num_logits_to_keep"):
+            build_whiteboard_model()(torch.tensor([[0]]), num_logits_to_keep=0)
