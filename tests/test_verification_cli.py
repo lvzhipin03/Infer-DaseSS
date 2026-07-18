@@ -14,6 +14,8 @@ class VerificationCliTest(unittest.TestCase):
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("--tolerance", completed.stdout)
+        self.assertIn("--attn-implementation", completed.stdout)
+        self.assertIn("{eager,sdpa}", completed.stdout)
 
 
 if __name__ == "__main__":

@@ -24,6 +24,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--prompt", default="中国的首都是哪里？")
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
     parser.add_argument("--tolerance", type=float, default=1e-3)
+    parser.add_argument(
+        "--attn-implementation", choices=("eager", "sdpa"), default="eager"
+    )
     return parser
 
 
@@ -40,7 +43,12 @@ def main() -> None:
     print(f"rendered_chat={rendered!r}")
     print(f"input_ids={token_ids}")
 
-    custom_model, report = load_pretrained_qwen(args.model_path, args.device, "float32")
+    custom_model, report = load_pretrained_qwen(
+        args.model_path,
+        args.device,
+        "float32",
+        attn_implementation=args.attn_implementation,
+    )
     oracle_model = AutoModelForCausalLM.from_pretrained(
         args.model_path,
         local_files_only=True,
@@ -61,6 +69,7 @@ def main() -> None:
     oracle_top_ids = tuple(int(value) for value in oracle_ids[0].cpu().tolist())
 
     print(f"checkpoint_tensors={report.tensor_count}")
+    print(f"custom_attention_backend={args.attn_implementation}")
     print(f"expected_tied_missing={list(report.expected_tied_missing)}")
     print(f"max_absolute_error={max_absolute_error:.9g}")
     print(f"max_relative_error={max_relative_error:.9g}")

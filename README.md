@@ -46,12 +46,15 @@ rsync -avz --exclude '.git/' --exclude '.venv/' --exclude '__pycache__/' \
   /mnt/d/vdesktop/infer-dasess/ dase314-server:/ai/projects/Infer-DaseSS/
 ```
 
-## Benchmark 第一阶段
+## Benchmark 第二阶段
 
 `student_release/student_engine.py` 直接复用仓库根目录的 `toy_qwen`，不是一套独立
-模型实现。第一阶段以正确性为目标：多个 prompt 保持顺序，但内部逐条执行 batch=1；
-接受 `--attn-implementation sdpa` 参数，实际仍使用 eager attention。真实 batch 和
-SDPA 是下一阶段工作。
+模型实现。当前实现保留可解释的 eager attention 作为数值参考，并增加 PyTorch SDPA
+运行后端；多个不同长度的 prompt 会按 `batch_size` 左填充，使用显式 attention mask
+和每行逻辑 position IDs 完成批量 prefill、KV Cache decode。prefill 只把最后位置送入
+LM Head，生成仍采用固定步数 greedy decode 并忽略 EOS，符合公开 benchmark 契约。
+
+完整公开 benchmark 的阶段二实测结果会在完成服务器正确性门禁后记录在本节。
 
 服务器运行时检查：
 

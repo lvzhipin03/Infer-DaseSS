@@ -8,7 +8,9 @@
 .venv-real/bin/pip install -r requirements-verify.txt
 .venv-real/bin/python verification/compare_transformers.py \
   --model-path /ai/llm/models/models/Qwen/Qwen2.5-0.5B-Instruct \
-  --prompt 中国的首都是哪里？ --device cuda --tolerance 1e-3
+  --prompt 中国的首都是哪里？ --device cuda --tolerance 1e-3 \
+  --attn-implementation sdpa
 ```
 
+`--attn-implementation` 只控制自研模型；Transformers oracle 固定使用 eager attention。
 脚本只在 top-10 顺序一致、greedy token 一致且最大绝对误差不超过阈值时返回 0。
