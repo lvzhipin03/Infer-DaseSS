@@ -152,12 +152,6 @@ source use_data_cache.sh
   --device cuda --dtype float16 --local-files-only
 ```
 
-单样本 smoke 使用下文命令，并额外设置：
-
-```text
---suite-isolation process --worker-timeout-s 1800
-```
-
 模型与评测包应已提前放到你自己的服务器上（课程公共服务器可用 `scp` 拉取；部分机器无法直连 Hugging Face，**不要依赖在线下载**）。运行前确认本机已有 `Qwen2.5-0.5B-Instruct` 的本地目录（内含 `config.json`、`model.safetensors`、tokenizer 等），并把下面命令里的 `--model` 改成你的实际路径。
 
 进入学生包：
@@ -202,6 +196,8 @@ python3 -u scripts/run_inference_benchmark.py \
   --max-new-tokens-cache-stress 32 \
   --baseline-summary data/public_baseline_summary.json \
   --allow-stale-baseline \
+  --suite-isolation process \
+  --worker-timeout-s 1800 \
   --output-dir results/smoke_test
 ```
 
