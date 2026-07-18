@@ -5,7 +5,7 @@ import torch
 
 from toy_qwen.config import whiteboard_config
 from toy_qwen.modeling import QwenToyForCausalLM
-from toy_qwen.pretrained import validate_checkpoint
+from toy_qwen.pretrained import _resolve_dtype, validate_checkpoint
 
 
 class CheckpointValidationTest(unittest.TestCase):
@@ -55,6 +55,14 @@ class CheckpointValidationTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "lm_head.weight"):
             validate_checkpoint(model, state)
+
+    def test_float16_dtype_is_supported(self):
+        self.assertIs(_resolve_dtype("float16"), torch.float16)
+        self.assertIs(_resolve_dtype(torch.float16), torch.float16)
+
+    def test_unsupported_dtype_message_lists_all_supported_values(self):
+        with self.assertRaisesRegex(ValueError, "float16.*bfloat16.*float32"):
+            _resolve_dtype("float64")
 
 
 if __name__ == "__main__":

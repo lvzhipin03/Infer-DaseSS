@@ -65,15 +65,20 @@ def validate_checkpoint(
 
 
 def _resolve_dtype(dtype: str | torch.dtype) -> torch.dtype:
-    supported = {"float32": torch.float32, "bfloat16": torch.bfloat16}
+    supported = {
+        "float16": torch.float16,
+        "bfloat16": torch.bfloat16,
+        "float32": torch.float32,
+    }
+    message = "dtype must be float16, bfloat16, or float32"
     if isinstance(dtype, torch.dtype):
         if dtype not in supported.values():
-            raise ValueError("dtype must be float32 or bfloat16")
+            raise ValueError(message)
         return dtype
     try:
         return supported[dtype]
     except KeyError as error:
-        raise ValueError("dtype must be 'float32' or 'bfloat16'") from error
+        raise ValueError(message) from error
 
 
 def load_pretrained_qwen(
