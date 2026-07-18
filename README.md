@@ -46,6 +46,38 @@ rsync -avz --exclude '.git/' --exclude '.venv/' --exclude '__pycache__/' \
   /mnt/d/vdesktop/infer-dasess/ dase314-server:/ai/projects/Infer-DaseSS/
 ```
 
+## Benchmark 第一阶段
+
+`student_release/student_engine.py` 直接复用仓库根目录的 `toy_qwen`，不是一套独立
+模型实现。第一阶段以正确性为目标：多个 prompt 保持顺序，但内部逐条执行 batch=1；
+接受 `--attn-implementation sdpa` 参数，实际仍使用 eager attention。真实 batch 和
+SDPA 是下一阶段工作。
+
+服务器运行时检查：
+
+```bash
+cd /ai/projects/Infer-DaseSS/student_release
+source use_data_cache.sh
+../.venv-real/bin/python scripts/validate_engine.py \
+  --model /ai/llm/models/models/Qwen/Qwen2.5-0.5B-Instruct \
+  --device cuda --dtype float16 --local-files-only
+```
+
+全 suite 单样本 smoke：
+
+```bash
+../.venv-real/bin/python -u scripts/run_inference_benchmark.py \
+  --model /ai/llm/models/models/Qwen/Qwen2.5-0.5B-Instruct \
+  --local-files-only --device cuda --dtype float16 \
+  --attn-implementation sdpa --limit 1 \
+  --decode-batch-sizes 1 --ttft-batch-sizes 1 \
+  --serving-fallback-batch-size 1 --mixed-batch-sizes 1 \
+  --cache-stress-batch-sizes 1 --max-new-tokens-cache-stress 32 \
+  --baseline-summary data/public_baseline_summary.json \
+  --allow-stale-baseline --suite-isolation process \
+  --worker-timeout-s 1800 --output-dir results/smoke_test
+```
+
 ## 白板配置
 
 默认配置为 9 个字符、hidden size 4、SwiGLU intermediate size 8、1 层、1 个

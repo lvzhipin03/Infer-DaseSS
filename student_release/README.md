@@ -136,6 +136,28 @@ benchmark 也会检查异常高吞吐或异常低延迟。明显不像真实 0.5
 
 ## 运行
 
+### 本仓库第一阶段适配器
+
+当前 `student_engine.py` 直接依赖父目录的 `toy_qwen` 手写实现，因此必须保留完整
+仓库目录结构，并从本目录启动 benchmark。第一阶段对 `prompts` 顺序执行，尚未实现
+真实 batch 或 SDPA；`attn_implementation` 仅作为兼容参数保存。
+
+服务器上的运行时接口检查：
+
+```bash
+cd /ai/projects/Infer-DaseSS/student_release
+source use_data_cache.sh
+../.venv-real/bin/python scripts/validate_engine.py \
+  --model /ai/llm/models/models/Qwen/Qwen2.5-0.5B-Instruct \
+  --device cuda --dtype float16 --local-files-only
+```
+
+单样本 smoke 使用下文命令，并额外设置：
+
+```text
+--suite-isolation process --worker-timeout-s 1800
+```
+
 模型与评测包应已提前放到你自己的服务器上（课程公共服务器可用 `scp` 拉取；部分机器无法直连 Hugging Face，**不要依赖在线下载**）。运行前确认本机已有 `Qwen2.5-0.5B-Instruct` 的本地目录（内含 `config.json`、`model.safetensors`、tokenizer 等），并把下面命令里的 `--model` 改成你的实际路径。
 
 进入学生包：
