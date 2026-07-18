@@ -1,24 +1,25 @@
-"""
-Student submission entry point for the strict inference-engine track.
-
-You must implement the model computation yourself: load tokenizer/config/raw
-weights, then write your own prefill, greedy decode, KV cache, batching, and any
-optimization strategy. The benchmark imports StudentEngine once and calls
-generate() for fixed-batch workloads.
-
-Advanced submissions may also implement serve_requests(requests, batch_size)
-for the request-stream serving/scheduling suite. If absent, the benchmark
-falls back to generate().
-
-Do not call Hugging Face AutoModel/AutoModelForCausalLM, model.forward,
-model(...), or model.generate(). Those APIs are intentionally outside the
-student release boundary for this assignment.
-"""
+"""Correctness-first benchmark adapter for the handwritten toy_qwen engine."""
 
 from __future__ import annotations
 
+from pathlib import Path
+import sys
+
+import torch
+
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+if str(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_ROOT))
+
+from toy_qwen.generation import greedy_generate
+from toy_qwen.pretrained import load_pretrained_qwen
+from toy_qwen.qwen_tokenizer import QwenTokenizerAdapter
+
 
 class StudentEngine:
+    """Expose the repository's manual Qwen2 forward through the course API."""
+
     def __init__(
         self,
         model_path: str,
@@ -26,20 +27,25 @@ class StudentEngine:
         dtype: str = "float16",
         attn_implementation: str = "sdpa",
         local_files_only: bool = False,
+        seed: int = 0,
     ):
         self.model_path = model_path
-        self.device = device
+        self.device = torch.device(device)
         self.dtype = dtype
         self.attn_implementation = attn_implementation
-        self.local_files_only = local_files_only
+        self.local_files_only = bool(local_files_only)
+        self.seed = int(seed)
 
-        # Recommended starting point:
-        # - use AutoTokenizer only for tokenization;
-        # - use utils.load_weights.load_config_and_state_dict() to read config
-        #   and raw safetensors weights;
-        # - implement Qwen embedding/RMSNorm/QKV/RoPE/attention/MLP/LM head,
-        #   prefill, greedy decode, and KV cache in this file or your helpers.
-        raise NotImplementedError("Implement your strict manual inference engine here.")
+        torch.manual_seed(self.seed)
+        if self.device.type == "cuda":
+            torch.cuda.manual_seed_all(self.seed)
+
+        self.tokenizer = QwenTokenizerAdapter.from_model_dir(model_path)
+        self.model, self.checkpoint_report = load_pretrained_qwen(
+            model_path,
+            device=self.device,
+            dtype=dtype,
+        )
 
     def generate(
         self,
@@ -48,28 +54,38 @@ class StudentEngine:
         batch_size: int = 1,
         suite_name: str | None = None,
     ) -> list[str]:
-        """
-        Return generated continuations in the same order as prompts.
+        """Generate fixed-step greedy continuations in original prompt order."""
+        del suite_name
+        if not prompts:
+            raise ValueError("prompts must not be empty")
+        if any(not isinstance(prompt, str) for prompt in prompts):
+            raise TypeError("every prompt must be a string")
+        if max_new_tokens <= 0:
+            raise ValueError("max_new_tokens must be positive")
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive")
 
-        Hard requirements:
-        - Return type must be list[str].
-        - len(outputs) must equal len(prompts).
-        - Outputs must correspond to the original prompt order.
-        - Outputs must be continuations only; do not prepend the full prompt.
-        - Do not read benchmark answer fields or hidden data.
-        - Do not call external LLM/API services.
-        - Do not call Hugging Face model.forward/model.generate or full
-          inference frameworks such as vLLM, llama.cpp, or TGI.
-        """
-        raise NotImplementedError("Implement generate().")
-
-    # Optional high-level serving interface for request-stream scheduling.
-    # The benchmark passes batch_size=None for serving_schedule, so optimized
-    # engines may choose their own active-batch policy.
-    # def serve_requests(self, requests: list[dict], batch_size: int | None = None):
-    #     return self.generate(
-    #         [request["prompt"] for request in requests],
-    #         max_new_tokens=max(int(request.get("max_new_tokens", 1)) for request in requests),
-    #         batch_size=batch_size or len(requests),
-    #         suite_name=None,
-    #     )
+        outputs: list[str] = []
+        for prompt in prompts:
+            _, token_ids = self.tokenizer.encode_chat([
+                {"role": "user", "content": prompt},
+            ])
+            input_ids = torch.tensor(
+                [token_ids],
+                dtype=torch.long,
+                device=self.device,
+            )
+            result = greedy_generate(
+                self.model,
+                input_ids,
+                eos_token_id=None,
+                max_new_tokens=max_new_tokens,
+                top_k=5,
+            )
+            outputs.append(
+                self.tokenizer.decode(
+                    result.generated_ids,
+                    skip_special_tokens=True,
+                )
+            )
+        return outputs
