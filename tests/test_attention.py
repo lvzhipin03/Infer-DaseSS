@@ -136,6 +136,35 @@ class AttentionTest(unittest.TestCase):
         torch.testing.assert_close(padded[0, -1], first[0], rtol=1e-5, atol=1e-5)
         torch.testing.assert_close(padded[1, -1], second[0], rtol=1e-5, atol=1e-5)
 
+    def test_sdpa_clears_non_finite_outputs_for_fully_masked_padding_queries(self):
+        model = build_whiteboard_model().eval().set_attention_implementation("sdpa")
+        padded_ids = torch.tensor([[8, 8, 0], [2, 3, 4]])
+        attention_mask = torch.tensor([[0, 0, 1], [1, 1, 1]])
+        position_ids = torch.tensor([[0, 0, 0], [0, 1, 2]])
+        native_sdpa = F.scaled_dot_product_attention
+
+        def backend_with_non_finite_masked_rows(query, key, value, **kwargs):
+            output = native_sdpa(query, key, value, **kwargs)
+            allowed = kwargs["attn_mask"]
+            fully_masked = ~allowed.any(dim=-1, keepdim=True)
+            return output.masked_fill(fully_masked, float("nan"))
+
+        with torch.no_grad(), patch(
+            "toy_qwen.modeling.F.scaled_dot_product_attention",
+            side_effect=backend_with_non_finite_masked_rows,
+        ):
+            output = model(
+                padded_ids,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                use_cache=True,
+            )
+
+        self.assertTrue(torch.isfinite(output.logits).all())
+        for key, value in output.past_key_values:
+            self.assertTrue(torch.isfinite(key).all())
+            self.assertTrue(torch.isfinite(value).all())
+
     def test_attention_mask_must_cover_full_key_length(self):
         model = build_whiteboard_model().eval().set_attention_implementation("sdpa")
         with self.assertRaisesRegex(ValueError, "attention_mask"):

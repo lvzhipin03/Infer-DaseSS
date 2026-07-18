@@ -139,7 +139,11 @@ class QwenToyAttention(nn.Module):
                 )
         if attention_mask is not None:
             query_is_valid = attention_mask[:, key_length - length :].bool()
-            output = output * query_is_valid[:, None, :, None]
+            output = torch.where(
+                query_is_valid[:, None, :, None],
+                output,
+                torch.zeros((), dtype=output.dtype, device=output.device),
+            )
         output = output.transpose(1, 2).contiguous().view(batch, length, -1)
         output = self.o_proj(output)
         trace = {"query": tuple(query.shape), "key": tuple(key.shape), "value": tuple(value.shape),
