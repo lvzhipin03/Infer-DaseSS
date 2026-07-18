@@ -41,4 +41,3 @@ The document will state explicitly that benchmark scripts, public data, baseline
 - The accepted metrics must be read from the server's retained `final_summary.json`, not copied only from terminal output.
 - README links must resolve to repository files.
 - `git diff --check` and the repository test/static-validation commands must remain clean.
-

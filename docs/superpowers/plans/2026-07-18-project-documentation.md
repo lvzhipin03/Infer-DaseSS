@@ -131,4 +131,3 @@ Expect the static validator and focused CLI tests to pass.
 git add README.md docs/benchmark-results.md
 git commit -m "docs: add portable run guide and benchmark results"
 ```
-

@@ -1,6 +1,8 @@
 import copy
 import unittest
+from unittest.mock import patch
 import torch
+import torch.nn.functional as F
 
 from toy_qwen.config import QwenToyConfig, whiteboard_config
 from toy_qwen.modeling import QwenToyAttention, QwenToyForCausalLM, QwenToyRotaryEmbedding, repeat_kv
@@ -66,6 +68,43 @@ class AttentionTest(unittest.TestCase):
         torch.testing.assert_close(actual.logits, expected.logits, rtol=1e-5, atol=1e-5)
         self.assertEqual(actual.trace["layer_0.attention_scores"], (1, 14, 4, 4))
         self.assertEqual(actual.past_key_values[0][0].shape, (1, 2, 4, 2))
+
+    def test_sdpa_capability_errors_repeat_gqa_keys_and_values(self):
+        config = QwenToyConfig(17, 28, 56, 1, 14, 2)
+        ids = torch.tensor([[0, 1, 2, 3]])
+        native_sdpa = F.scaled_dot_product_attention
+
+        for capability_error in (
+            TypeError("unexpected keyword argument 'enable_gqa'"),
+            RuntimeError("No available kernel. Aborting execution."),
+        ):
+            with self.subTest(error=type(capability_error).__name__):
+                torch.manual_seed(11)
+                eager = QwenToyForCausalLM(config).eval()
+                sdpa = copy.deepcopy(eager).set_attention_implementation("sdpa")
+                calls = []
+
+                def simulated_backend(query, key, value, **kwargs):
+                    calls.append((query, key, value, kwargs))
+                    if len(calls) == 1:
+                        raise capability_error
+                    return native_sdpa(query, key, value, **kwargs)
+
+                with torch.no_grad():
+                    expected = eager(ids, use_cache=False).logits
+                    with patch(
+                        "toy_qwen.modeling.F.scaled_dot_product_attention",
+                        side_effect=simulated_backend,
+                    ):
+                        actual = sdpa(ids, use_cache=False).logits
+
+                self.assertEqual(len(calls), 2)
+                self.assertEqual(calls[0][1].shape[1], 2)
+                self.assertTrue(calls[0][3]["enable_gqa"])
+                self.assertEqual(calls[1][1].shape[1], 14)
+                self.assertEqual(calls[1][2].shape[1], 14)
+                self.assertNotIn("enable_gqa", calls[1][3])
+                torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
 
     def test_sdpa_future_token_does_not_change_first_output(self):
         model = build_whiteboard_model().eval().set_attention_implementation("sdpa")

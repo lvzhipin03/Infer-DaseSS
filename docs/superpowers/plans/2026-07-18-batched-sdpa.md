@@ -347,7 +347,7 @@ From the server `student_release` directory, source `use_data_cache.sh` and run 
 
 - [ ] **Step 2: Validate result completeness**
 
-Read `final_summary.json`, `final_summary.txt`, student summary, and CSV. Confirm six suites, requested batch groups, runtime/valid >=0.98, long partial >=0.90, no OOM/timeouts, and decode batch-4 TPS > batch-1 TPS.
+Read `final_summary.json`, `final_summary.txt`, student summary, and CSV. Confirm six suites, requested batch groups, runtime success >=0.98, valid-output rate is no lower than the bundled public baseline, long partial >=0.90, no OOM/timeouts, and decode batch-4 TPS > batch-1 TPS. The valid-output field includes content scoring, so it must not be treated as a pure runtime-health threshold.
 
 If any gate fails, use systematic debugging and do not relax the gate without evidence.
 

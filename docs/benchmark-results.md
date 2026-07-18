@@ -133,6 +133,15 @@ results/phase2_full_retry_20260718/student/results.csv       112192 bytes
 
 正式分数和表格数据均从保留的 `final_summary.json` 提取，并与 `final_summary.txt` 交叉检查。
 
+### 复现检查清单
+
+- [ ] checkout 实现 commit `5af72a7e9c2d7cc72d0373612e3611e3aca4ffb3` 或其后仅含文档的提交；
+- [ ] benchmark 包 SHA-256 与本页记录一致；
+- [ ] `MODEL_PATH` 下存在 config、单文件 safetensors 和 tokenizer 文件；
+- [ ] Python、PyTorch/CUDA、FP16 和 SDPA 环境与版本表一致；
+- [ ] 使用本页完整命令且不传 `--limit`，确认六个 suite 均出现；
+- [ ] 保留 `final_summary.json`、`final_summary.txt`、student summary 和 CSV。
+
 ### 简要分析
 
 - 正确性：真实 SDPA 与 Transformers eager 的最大 logits 绝对误差为 `3.50e-05`；Long partial 0.950。
@@ -147,4 +156,3 @@ results/phase2_full_retry_20260718/student/results.csv       112192 bytes
 2. 增加长度分桶及可使用 FlashAttention 的 padding-mask 路径，降低 TTFT 和峰值显存。
 3. 实现 `serve_requests` 与 continuous batching，提升 Serving 分项并降低 p95。
 4. 增加 shared-prefix KV 复用，改善 serving 和长上下文重复前缀场景。
-

@@ -127,6 +127,12 @@ python3.11 -m venv --system-site-packages .venv-real
 export PYTHON_BIN="$PROJECT_ROOT/.venv-real/bin/python"
 ```
 
+需要在这台环境运行公开 benchmark 时，再安装 benchmark 依赖：
+
+```bash
+"$PROJECT_ROOT/.venv-real/bin/pip" install -r student_release/requirements.txt
+```
+
 依赖分层：
 
 | 场景 | 依赖 |
