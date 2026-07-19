@@ -5,7 +5,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from .cache import PastKeyValue, PastKeyValues, cache_length, validate_past_key_values
+from .cache import KVCache, StaticKVCache, cache_length, validate_past_key_values
 from .config import QwenToyConfig
 
 
@@ -63,6 +63,11 @@ def _allowed_attention_mask(batch_size, query_length, key_length, past_length, a
     return allowed
 
 
+def _validate_input_ids(input_ids: torch.Tensor, vocab_size: int) -> None:
+    if input_ids.min() < 0 or input_ids.max() >= vocab_size:
+        raise ValueError("input token id is outside the vocabulary")
+
+
 class QwenToyAttention(nn.Module):
     def __init__(self, config: QwenToyConfig, layer_idx: int):
         super().__init__()
@@ -73,7 +78,15 @@ class QwenToyAttention(nn.Module):
         self.o_proj = nn.Linear(config.num_attention_heads * config.head_dim, config.hidden_size, bias=False)
         self.attn_implementation = "eager"
 
-    def forward(self, hidden_states, position_embeddings, past_key_value=None, attention_mask=None, use_cache=False):
+    def forward(
+        self,
+        hidden_states,
+        position_embeddings,
+        past_key_value=None,
+        attention_mask=None,
+        use_cache=False,
+        allowed_attention_mask=None,
+    ):
         batch, length, _ = hidden_states.shape
         def shape(x, heads):
             return x.view(batch, length, heads, self.config.head_dim).transpose(1, 2)
@@ -82,15 +95,30 @@ class QwenToyAttention(nn.Module):
         value = shape(self.v_proj(hidden_states), self.config.num_key_value_heads)
         query, key = apply_rotary_pos_emb(query, key, *position_embeddings)
         past_length = 0
-        if past_key_value is not None:
+        if isinstance(past_key_value, StaticKVCache):
+            if not use_cache:
+                raise ValueError("StaticKVCache requires use_cache=True")
+            past_length = past_key_value.length
+            key, value = past_key_value.update(self.layer_idx, key, value)
+        elif past_key_value is not None:
             past_length = past_key_value[0].shape[2]
             key = torch.cat((past_key_value[0], key), dim=2)
             value = torch.cat((past_key_value[1], value), dim=2)
-        present = (key, value) if use_cache else None
-        key_length = key.shape[2]
-        allowed = _allowed_attention_mask(
-            batch, length, key_length, past_length, attention_mask, query.device
+        present = (
+            past_key_value
+            if isinstance(past_key_value, StaticKVCache)
+            else ((key, value) if use_cache else None)
         )
+        key_length = key.shape[2]
+        if allowed_attention_mask is None:
+            allowed = _allowed_attention_mask(
+                batch, length, key_length, past_length, attention_mask, query.device
+            )
+        else:
+            expected_mask_shape = (batch, 1, length, key_length)
+            if allowed_attention_mask.shape != expected_mask_shape:
+                raise ValueError("allowed_attention_mask shape mismatch")
+            allowed = allowed_attention_mask
         logical_scores_shape = (batch, self.config.num_attention_heads, length, key_length)
         if self.attn_implementation == "eager":
             repeated_key = repeat_kv(key, self.config.num_key_value_groups)
@@ -137,7 +165,7 @@ class QwenToyAttention(nn.Module):
                     dropout_p=0.0,
                     is_causal=False,
                 )
-        if attention_mask is not None:
+        if attention_mask is not None and past_length == 0:
             query_is_valid = attention_mask[:, key_length - length :].bool()
             output = torch.where(
                 query_is_valid[:, None, :, None],
@@ -159,9 +187,32 @@ class QwenToyMLP(nn.Module):
         self.gate_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=config.mlp_bias)
         self.up_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=config.mlp_bias)
         self.down_proj = nn.Linear(config.intermediate_size, config.hidden_size, bias=config.mlp_bias)
+        self.register_buffer("_fused_gate_up_weight", None, persistent=False)
+        self.register_buffer("_fused_gate_up_bias", None, persistent=False)
+
+    def prepare_for_inference(self) -> None:
+        self._fused_gate_up_weight = torch.cat(
+            (self.gate_proj.weight.detach(), self.up_proj.weight.detach()),
+            dim=0,
+        )
+        if self.gate_proj.bias is not None:
+            self._fused_gate_up_bias = torch.cat(
+                (self.gate_proj.bias.detach(), self.up_proj.bias.detach()),
+                dim=0,
+            )
 
     def forward(self, x):
-        return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
+        if self._fused_gate_up_weight is None:
+            gate = self.gate_proj(x)
+            up = self.up_proj(x)
+        else:
+            gate_up = F.linear(
+                x,
+                self._fused_gate_up_weight,
+                self._fused_gate_up_bias,
+            )
+            gate, up = gate_up.chunk(2, dim=-1)
+        return self.down_proj(F.silu(gate) * up)
 
 
 class QwenToyDecoderLayer(nn.Module):
@@ -172,9 +223,24 @@ class QwenToyDecoderLayer(nn.Module):
         self.input_layernorm = QwenToyRMSNorm(config.hidden_size, config.rms_norm_eps)
         self.post_attention_layernorm = QwenToyRMSNorm(config.hidden_size, config.rms_norm_eps)
 
-    def forward(self, hidden_states, position_embeddings, past_key_value=None, attention_mask=None, use_cache=False):
+    def forward(
+        self,
+        hidden_states,
+        position_embeddings,
+        past_key_value=None,
+        attention_mask=None,
+        use_cache=False,
+        allowed_attention_mask=None,
+    ):
         residual = hidden_states
-        attention, present, trace = self.self_attn(self.input_layernorm(hidden_states), position_embeddings, past_key_value, attention_mask, use_cache)
+        attention, present, trace = self.self_attn(
+            self.input_layernorm(hidden_states),
+            position_embeddings,
+            past_key_value,
+            attention_mask,
+            use_cache,
+            allowed_attention_mask,
+        )
         hidden_states = residual + attention
         residual = hidden_states
         mlp_input = self.post_attention_layernorm(hidden_states)
@@ -187,7 +253,7 @@ class QwenToyDecoderLayer(nn.Module):
 @dataclass
 class BaseModelOutput:
     last_hidden_state: torch.Tensor
-    past_key_values: PastKeyValues | None
+    past_key_values: KVCache | None
     hidden_states: tuple[torch.Tensor, ...] | None
     trace: dict[str, tuple[int, ...]] | None
 
@@ -195,7 +261,7 @@ class BaseModelOutput:
 @dataclass
 class CausalLMOutput:
     logits: torch.Tensor
-    past_key_values: PastKeyValues | None = None
+    past_key_values: KVCache | None = None
     hidden_states: tuple[torch.Tensor, ...] | None = None
     trace: dict[str, tuple[int, ...]] | None = None
 
@@ -213,25 +279,49 @@ class QwenToyModel(nn.Module):
                 use_cache=None, output_hidden_states=False, trace_shapes=False):
         if input_ids.ndim != 2 or input_ids.shape[1] == 0:
             raise ValueError("input_ids must be a non-empty rank-2 tensor")
-        if input_ids.min() < 0 or input_ids.max() >= self.config.vocab_size:
-            raise ValueError("input token id is outside the vocabulary")
+        if past_key_values is None or (
+            isinstance(past_key_values, StaticKVCache) and past_key_values.length == 0
+        ):
+            _validate_input_ids(input_ids, self.config.vocab_size)
         batch, length = input_ids.shape
         validate_past_key_values(past_key_values, self.config, batch)
         past_length = cache_length(past_key_values)
         if past_length + length > self.config.max_position_embeddings:
             raise ValueError("sequence exceeds max_position_embeddings")
         use_cache = self.config.use_cache if use_cache is None else use_cache
+        if isinstance(past_key_values, StaticKVCache) and not use_cache:
+            raise ValueError("StaticKVCache requires use_cache=True")
         if position_ids is None:
             position_ids = torch.arange(past_length, past_length + length, device=input_ids.device).unsqueeze(0).expand(batch, -1)
         hidden = self.embed_tokens(input_ids)
         trace = {"embedding": tuple(hidden.shape)} if trace_shapes else None
         states = [hidden] if output_hidden_states else None
         positions = self.rotary_emb(position_ids, hidden.dtype)
+        allowed_attention_mask = _allowed_attention_mask(
+            batch,
+            length,
+            past_length + length,
+            past_length,
+            attention_mask,
+            input_ids.device,
+        )
         presents = []
         for index, layer in enumerate(self.layers):
-            past = None if past_key_values is None else past_key_values[index]
-            hidden, present, layer_trace = layer(hidden, positions, past, attention_mask, use_cache)
-            if use_cache:
+            if past_key_values is None:
+                past = None
+            elif isinstance(past_key_values, StaticKVCache):
+                past = past_key_values
+            else:
+                past = past_key_values[index]
+            hidden, present, layer_trace = layer(
+                hidden,
+                positions,
+                past,
+                attention_mask,
+                use_cache,
+                allowed_attention_mask,
+            )
+            if use_cache and not isinstance(past_key_values, StaticKVCache):
                 presents.append(present)
             if states is not None:
                 states.append(hidden)
@@ -242,7 +332,12 @@ class QwenToyModel(nn.Module):
             states.append(hidden)
         if trace is not None:
             trace["final_norm"] = tuple(hidden.shape)
-        return BaseModelOutput(hidden, tuple(presents) if use_cache else None,
+        if isinstance(past_key_values, StaticKVCache):
+            past_key_values.advance(length)
+            output_cache: KVCache | None = past_key_values
+        else:
+            output_cache = tuple(presents) if use_cache else None
+        return BaseModelOutput(hidden, output_cache,
                                tuple(states) if states is not None else None, trace)
 
 
@@ -260,6 +355,11 @@ class QwenToyForCausalLM(nn.Module):
             raise ValueError("attention implementation must be eager or sdpa")
         for layer in self.model.layers:
             layer.self_attn.attn_implementation = name
+        return self
+
+    def prepare_for_inference(self):
+        for layer in self.model.layers:
+            layer.mlp.prepare_for_inference()
         return self
 
     def forward(self, input_ids, num_logits_to_keep=None, **kwargs):

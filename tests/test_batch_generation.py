@@ -1,8 +1,10 @@
 import unittest
 from dataclasses import replace
+from unittest.mock import patch
 
 import torch
 
+import toy_qwen.generation as generation_module
 from toy_qwen.config import whiteboard_config
 from toy_qwen.generation import PaddedBatch, batched_greedy_generate, left_pad_token_ids
 from toy_qwen.modeling import QwenToyForCausalLM
@@ -93,6 +95,25 @@ class BatchedGenerationTest(unittest.TestCase):
             handle.remove()
 
         self.assertEqual(lm_head_lengths, [1, 1, 1])
+
+    def test_cache_shapes_are_collected_only_for_first_and_last_steps(self):
+        batch = left_pad_token_ids(
+            [[0, 1], [2, 3, 4]], pad_token_id=8, device="cpu"
+        )
+
+        with patch(
+            "toy_qwen.generation._cache_shapes",
+            wraps=generation_module._cache_shapes,
+        ) as cache_shapes:
+            result = batched_greedy_generate(
+                self.model,
+                batch,
+                max_new_tokens=4,
+            )
+
+        self.assertEqual(cache_shapes.call_count, 2)
+        self.assertEqual(result.first_cache_shapes[0][0], (2, 1, 3, 4))
+        self.assertEqual(result.last_cache_shapes[0][0], (2, 1, 6, 4))
 
     def test_cached_second_token_matches_uncached_full_forward(self):
         prompts = [[0, 1], [2, 3, 4]]

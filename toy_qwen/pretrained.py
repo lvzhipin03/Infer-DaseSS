@@ -113,5 +113,6 @@ def load_pretrained_qwen(
     if config.tie_word_embeddings:
         model.lm_head.weight = model.model.embed_tokens.weight
     model.to(target_device)
+    model.prepare_for_inference()
     model.eval()
     return model, report

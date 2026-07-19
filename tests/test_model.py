@@ -1,5 +1,6 @@
 import unittest
 from dataclasses import replace
+from unittest.mock import patch
 import torch
 import torch.nn.functional as F
 
@@ -13,6 +14,17 @@ class ModelTest(unittest.TestCase):
         mlp = QwenToyMLP(whiteboard_config())
         x = torch.randn(1, 2, 4)
         torch.testing.assert_close(mlp(x), mlp.down_proj(F.silu(mlp.gate_proj(x)) * mlp.up_proj(x)))
+
+    def test_fused_mlp_matches_unfused_and_preserves_checkpoint_keys(self):
+        mlp = QwenToyMLP(whiteboard_config()).eval()
+        x = torch.randn(2, 3, 4)
+        expected = mlp(x)
+        checkpoint_keys = set(mlp.state_dict())
+
+        mlp.prepare_for_inference()
+
+        torch.testing.assert_close(mlp(x), expected)
+        self.assertEqual(set(mlp.state_dict()), checkpoint_keys)
 
     def test_model_shapes_cache_and_paths(self):
         model = QwenToyForCausalLM(whiteboard_config())
@@ -47,3 +59,23 @@ class ModelTest(unittest.TestCase):
     def test_num_logits_to_keep_must_be_positive(self):
         with self.assertRaisesRegex(ValueError, "num_logits_to_keep"):
             build_whiteboard_model()(torch.tensor([[0]]), num_logits_to_keep=0)
+
+    def test_prefill_rejects_token_ids_outside_vocabulary(self):
+        model = build_whiteboard_model()
+        for invalid_id in (-1, model.config.vocab_size):
+            with self.subTest(token_id=invalid_id):
+                with self.assertRaisesRegex(ValueError, "outside the vocabulary"):
+                    model(torch.tensor([[invalid_id]]), use_cache=True)
+
+    def test_cached_decode_skips_redundant_input_id_range_validation(self):
+        model = build_whiteboard_model().eval()
+        with torch.no_grad():
+            prefill = model(torch.tensor([[0, 1]]), use_cache=True)
+            with patch("toy_qwen.modeling._validate_input_ids") as validate:
+                model(
+                    torch.tensor([[2]]),
+                    past_key_values=prefill.past_key_values,
+                    use_cache=True,
+                )
+
+        validate.assert_not_called()

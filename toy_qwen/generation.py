@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import torch
 
-from .cache import PastKeyValues
+from .cache import KVCache, StaticKVCache
 from .modeling import QwenToyForCausalLM
 
 
@@ -46,8 +46,12 @@ class BatchedGenerationResult:
     last_cache_shapes: CacheShapes
 
 
-def _cache_shapes(cache: PastKeyValues) -> CacheShapes:
-    return tuple((tuple(key.shape), tuple(value.shape)) for key, value in cache)
+def _cache_shapes(cache: KVCache) -> CacheShapes:
+    if isinstance(cache, StaticKVCache):
+        layers = (cache.layer(index) for index in range(len(cache.key_cache)))
+    else:
+        layers = iter(cache)
+    return tuple((tuple(key.shape), tuple(value.shape)) for key, value in layers)
 
 
 def left_pad_token_ids(
@@ -122,14 +126,31 @@ def batched_greedy_generate(
         raise ValueError("generation requires a forward beyond max_position_embeddings")
 
     batch_size = batch.input_ids.shape[0]
-    generated: list[list[int]] = [[] for _ in range(batch_size)]
+    generation_capacity = prompt_width + max_new_tokens - 1
+    generated_ids = torch.empty(
+        (batch_size, max_new_tokens),
+        dtype=torch.long,
+        device=batch.input_ids.device,
+    )
+    attention_mask_buffer = torch.zeros(
+        (batch_size, generation_capacity),
+        dtype=batch.attention_mask.dtype,
+        device=batch.attention_mask.device,
+    )
+    attention_mask_buffer[:, :prompt_width].copy_(batch.attention_mask)
     current_ids = batch.input_ids
     current_positions = batch.position_ids
-    full_attention_mask = batch.attention_mask
-    past_key_values: PastKeyValues | None = None
+    full_attention_mask = attention_mask_buffer[:, :prompt_width]
+    parameter = next(model.parameters())
+    past_key_values: KVCache | None = StaticKVCache.allocate(
+        model.config,
+        batch_size,
+        generation_capacity,
+        device=batch.input_ids.device,
+        dtype=parameter.dtype,
+    )
     prefill_logits_shape: tuple[int, ...] | None = None
     first_cache_shapes: CacheShapes | None = None
-    last_cache_shapes: CacheShapes | None = None
 
     with torch.inference_mode():
         for index in range(max_new_tokens):
@@ -147,33 +168,32 @@ def batched_greedy_generate(
                 prefill_logits_shape = tuple(output.logits.shape)
 
             next_ids = output.logits[:, -1, :].argmax(dim=-1)
-            for row, token_id in enumerate(next_ids.detach().cpu().tolist()):
-                generated[row].append(int(token_id))
+            generated_ids[:, index] = next_ids
 
             past_key_values = output.past_key_values
-            last_cache_shapes = _cache_shapes(past_key_values)
             if first_cache_shapes is None:
-                first_cache_shapes = last_cache_shapes
+                first_cache_shapes = _cache_shapes(past_key_values)
             if index + 1 < max_new_tokens:
                 current_ids = next_ids[:, None]
                 current_positions = (batch.lengths + index)[:, None]
-                full_attention_mask = torch.cat(
-                    (
-                        full_attention_mask,
-                        torch.ones(
-                            (batch_size, 1),
-                            dtype=full_attention_mask.dtype,
-                            device=full_attention_mask.device,
-                        ),
-                    ),
-                    dim=1,
-                )
+                next_mask_length = prompt_width + index + 1
+                attention_mask_buffer[:, next_mask_length - 1] = 1
+                full_attention_mask = attention_mask_buffer[:, :next_mask_length]
 
     assert prefill_logits_shape is not None
     assert first_cache_shapes is not None
-    assert last_cache_shapes is not None
+    assert past_key_values is not None
+    last_cache_shapes = (
+        first_cache_shapes
+        if max_new_tokens == 1
+        else _cache_shapes(past_key_values)
+    )
+    generated = tuple(
+        tuple(int(token_id) for token_id in row)
+        for row in generated_ids.detach().cpu().tolist()
+    )
     return BatchedGenerationResult(
-        generated_ids=tuple(tuple(row) for row in generated),
+        generated_ids=generated,
         prefill_logits_shape=prefill_logits_shape,
         first_cache_shapes=first_cache_shapes,
         last_cache_shapes=last_cache_shapes,
@@ -195,7 +215,18 @@ def greedy_generate(
         raise ValueError("top_k must be positive")
     generated_ids: list[int] = []
     steps: list[GenerationStep] = []
-    past_key_values: PastKeyValues | None = None
+    parameter = next(model.parameters())
+    cache_capacity = min(
+        input_ids.shape[1] + max_new_tokens - 1,
+        model.config.max_position_embeddings,
+    )
+    past_key_values: KVCache | None = StaticKVCache.allocate(
+        model.config,
+        input_ids.shape[0],
+        cache_capacity,
+        device=input_ids.device,
+        dtype=parameter.dtype,
+    )
     current_ids = input_ids
     prefill_logits_shape: tuple[int, ...] | None = None
     first_cache_shapes: CacheShapes | None = None
